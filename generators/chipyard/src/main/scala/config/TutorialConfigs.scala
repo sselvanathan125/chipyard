@@ -81,7 +81,7 @@ class TutorialNoCConfig extends Config(
         "system[0]" -> 3, "system[1]" -> 4, "system[2]" -> 5, "system[3]" -> 6,
         "pbus" -> 7))
   )) ++
-  new chipyard.example.WithGCD ++
+ // new chipyard.example.WithGCD ++
   new chipyard.harness.WithLoopbackNIC ++
   new icenet.WithIceNIC ++
   new fftgenerator.WithFFTGenerator(numPoints=8) ++

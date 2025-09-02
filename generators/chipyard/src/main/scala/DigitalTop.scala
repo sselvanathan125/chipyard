@@ -32,9 +32,11 @@ class DigitalTop(implicit p: Parameters) extends ChipyardSystem
   with sifive.blocks.devices.spi.HasPeripherySPI // Enables optionally adding the sifive SPI port
   with icenet.CanHavePeripheryIceNIC // Enables optionally adding the IceNIC for FireSim
   with chipyard.example.CanHavePeripheryGCD // Enables optionally adding the GCD example widget
+ // with chipyard.example.CanHavePeripherySimpleDMA //
   with chipyard.clocking.HasChipyardPRCI // Use Chipyard reset/clock distribution
   with chipyard.clocking.CanHaveClockTap // Enables optionally adding a clock tap output port
   with constellation.soc.CanHaveGlobalNoC // Support instantiating a global NoC interconnect
+// with chipyard.example.CanHavePeripheryMAC //MAC BlackBox
   with rerocc.CanHaveReRoCCTiles // Support tiles that instantiate rerocc-attached accelerators
 {
   override lazy val module = new DigitalTopModule(this)

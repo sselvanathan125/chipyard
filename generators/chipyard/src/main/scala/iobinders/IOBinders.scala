@@ -40,6 +40,9 @@ import testchipip.tsi.{CanHavePeripheryUARTTSI, UARTTSIIO}
 import icenet.{CanHavePeripheryIceNIC, SimNetwork, NicLoopback, NICKey, NICIOvonly}
 import chipyard.{CanHaveMasterTLMemPort, ChipyardSystem, ChipyardSystemModule}
 import chipyard.example.{CanHavePeripheryGCD}
+import chipyard.example.{CanHavePeripheryGCD}
+//import chipyard.example.{CanHavePeripheryMAC}
+
 
 import scala.reflect.{ClassTag}
 

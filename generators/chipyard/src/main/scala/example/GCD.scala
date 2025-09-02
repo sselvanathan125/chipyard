@@ -10,7 +10,7 @@ import freechips.rocketchip.prci._
 import freechips.rocketchip.subsystem.{BaseSubsystem, PBUS}
 import org.chipsalliance.cde.config.{Parameters, Field, Config}
 import freechips.rocketchip.diplomacy._
-import freechips.rocketchip.regmapper.{HasRegMap, RegField}
+import freechips.rocketchip.regmapper.{HasRegMap, RegField, RegFieldDesc}
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 
@@ -27,20 +27,27 @@ case class GCDParams(
 }
 // DOC include end: GCD params
 
+
 // DOC include start: GCD key
 case object GCDKey extends Field[Option[GCDParams]](None)
 // DOC include end: GCD key
 
+// Modified GCDIO to remove extra data inputs
 class GCDIO(val w: Int) extends Bundle {
   val clock = Input(Clock())
   val reset = Input(Bool())
   val input_ready = Output(Bool())
   val input_valid = Input(Bool())
-  val x = Input(UInt(w.W))
-  val y = Input(UInt(w.W))
+  val ax = Input(UInt(w.W))
   val output_ready = Input(Bool())
   val output_valid = Output(Bool())
-  val gcd = Output(UInt(w.W))
+  val res = Output(UInt((2 * w).W))
+  val dp_read_addr = Input(UInt(6.W))
+
+  val mem_addr = Input(UInt(log2Ceil(192).W))
+  val mem_write_data = Input(UInt(w.W))
+  val mem_write_en = Input(Bool())
+  val load_count = Output(UInt(6.W))
   val busy = Output(Bool())
 }
 
@@ -51,9 +58,8 @@ class HLSGCDAccelIO(val w: Int) extends Bundle {
   val ap_done = Output(Bool())
   val ap_idle = Output(Bool())
   val ap_ready = Output(Bool())
-  val x = Input(UInt(w.W))
-  val y = Input(UInt(w.W))
-  val ap_return = Output(UInt(w.W))
+  val ax = Input(UInt(w.W))
+  val ap_return = Output(UInt((2 * w).W))
 }
 
 class GCDTopIO extends Bundle {
@@ -72,35 +78,29 @@ class GCDMMIOBlackBox(val w: Int) extends BlackBox(Map("WIDTH" -> IntParam(w))) 
 // DOC include end: GCD blackbox
 
 // DOC include start: GCD chisel
+// This Chisel module is a placeholder, the logic is simplified to pass 'ax' through
 class GCDMMIOChiselModule(val w: Int) extends Module {
   val io = IO(new GCDIO(w))
-  val s_idle :: s_run :: s_done :: Nil = Enum(3)
+  val s_idle :: s_done :: Nil = Enum(2)
 
   val state = RegInit(s_idle)
-  val tmp   = Reg(UInt(w.W))
-  val gcd   = Reg(UInt(w.W))
+  val res_reg = Reg(UInt((2*w).W))
 
   io.input_ready := state === s_idle
   io.output_valid := state === s_done
-  io.gcd := gcd
+  io.res := res_reg
+
+  // Dummy connections for other ports
+  io.mem_addr := 0.U
+  io.mem_write_data := 0.U
+  io.mem_write_en := false.B
+  io.load_count := 0.U
 
   when (state === s_idle && io.input_valid) {
-    state := s_run
-  } .elsewhen (state === s_run && tmp === 0.U) {
     state := s_done
+    res_reg := io.ax // Pass input 'ax' to result register
   } .elsewhen (state === s_done && io.output_ready) {
     state := s_idle
-  }
-
-  when (state === s_idle && io.input_valid) {
-    gcd := io.x
-    tmp := io.y
-  } .elsewhen (state === s_run) {
-    when (gcd > tmp) {
-      gcd := gcd - tmp
-    } .otherwise {
-      tmp := tmp - gcd
-    }
   }
 
   io.busy := state =/= s_idle
@@ -113,7 +113,7 @@ class HLSGCDAccelBlackBox(val w: Int) extends BlackBox with HasBlackBoxPath {
 
   val chipyardDir = System.getProperty("user.dir")
   val hlsDir = s"$chipyardDir/generators/chipyard"
-  
+
   // Run HLS command
   val make = s"make -C ${hlsDir}/src/main/resources/hls default"
   require (make.! == 0, "Failed to run HLS")
@@ -126,56 +126,65 @@ class HLSGCDAccelBlackBox(val w: Int) extends BlackBox with HasBlackBoxPath {
 
 // DOC include start: GCD router
 class GCDTL(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends ClockSinkDomain(ClockSinkParameters())(p) {
-  val device = new SimpleDevice("gcd", Seq("ucbbar,gcd")) 
+  val device = new SimpleDevice("gcd", Seq("ucbbar,gcd"))
   val node = TLRegisterNode(Seq(AddressSet(params.address, 4096-1)), device, "reg/control", beatBytes=beatBytes)
 
   override lazy val module = new GCDImpl
   class GCDImpl extends Impl with HasGCDTopIO {
     val io = IO(new GCDTopIO)
     withClockAndReset(clock, reset) {
-      // How many clock cycles in a PWM cycle?
-      val x = Reg(UInt(params.width.W))
-      val y = Wire(new DecoupledIO(UInt(params.width.W)))
-      val gcd = Wire(new DecoupledIO(UInt(params.width.W)))
-      val status = Wire(UInt(2.W))
+      val ax = Wire(new DecoupledIO(UInt(params.width.W)))
+      val res = Wire(new DecoupledIO(UInt((2 * params.width).W)))
+      val dp_read_addr_reg = Reg(UInt(6.W))
+      val mem_addr_reg = Reg(UInt(log2Ceil(192).W))
+      val mem_write_data_reg = Reg(UInt(params.width.W))
+      val mem_write_en_reg = RegInit(false.B)
+      val load_count_wire = Wire(new DecoupledIO(UInt(6.W)))
 
-      val impl_io = if (params.useBlackBox) {
-        val impl = Module(new GCDMMIOBlackBox(params.width))
-        impl.io
-      } else {
-        val impl = Module(new GCDMMIOChiselModule(params.width))
-        impl.io
-      }
-
+      val impl_io = Module(new GCDMMIOBlackBox(params.width)).io
       impl_io.clock := clock
       impl_io.reset := reset.asBool
+      val status = Cat(impl_io.input_ready, impl_io.output_valid)
+      
+      // Connect input, valid is triggered by write to 'ax' register
+      impl_io.ax := ax.bits
+      impl_io.input_valid := ax.valid
+      ax.ready := impl_io.input_ready
 
-      impl_io.x := x
-      impl_io.y := y.bits
-      impl_io.input_valid := y.valid
-      y.ready := impl_io.input_ready
+      impl_io.dp_read_addr := dp_read_addr_reg
 
-      gcd.bits := impl_io.gcd
-      gcd.valid := impl_io.output_valid
-      impl_io.output_ready := gcd.ready
+      res.bits := impl_io.res
+      res.valid := impl_io.output_valid
+      impl_io.output_ready := res.ready
 
-      status := Cat(impl_io.input_ready, impl_io.output_valid)
       io.gcd_busy := impl_io.busy
+      impl_io.mem_addr := mem_addr_reg
+      impl_io.mem_write_data := mem_write_data_reg
+      impl_io.mem_write_en := mem_write_en_reg
+      load_count_wire.bits := impl_io.load_count
+      load_count_wire.valid := true.B
 
-// DOC include start: GCD instance regmap
+      when (mem_write_en_reg) {
+        mem_write_en_reg := false.B
+      }
+
+      // Define the memory map
       node.regmap(
-        0x00 -> Seq(
-          RegField.r(2, status)), // a read-only register capturing current status
-        0x04 -> Seq(
-          RegField.w(params.width, x)), // a plain, write-only register
-        0x08 -> Seq(
-          RegField.w(params.width, y)), // write-only, y.valid is set on write
-        0x0C -> Seq(
-          RegField.r(params.width, gcd))) // read-only, gcd.ready is set on read
-// DOC include end: GCD instance regmap
+        0x00 -> Seq(RegField.r(2, status)),
+        0x04 -> Seq(RegField.w(params.width, ax)),
+        0x08 -> Seq(RegField.r((2 * params.width), res)),
+        // Assuming 32-bit width, res is 64-bit and takes up 0x08 and 0x0C
+        0x10 -> Seq(RegField.r(6, load_count_wire)),
+        0x14 -> Seq(RegField.w(log2Ceil(192), mem_addr_reg)),
+        0x18 -> Seq(RegField.w(params.width, mem_write_data_reg)),
+        0x1C -> Seq(RegField.w(1, mem_write_en_reg)),
+        0x20 -> Seq(RegField.w(6, dp_read_addr_reg, RegFieldDesc("dp_read_addr", "Address (0-33) of DP result to read via 'res' port.")))
+      )
     }
   }
 }
+
+
 
 class GCDAXI4(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends ClockSinkDomain(ClockSinkParameters())(p) {
   val node = AXI4RegisterNode(AddressSet(params.address, 4096-1), beatBytes=beatBytes)
@@ -183,63 +192,73 @@ class GCDAXI4(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends
   class GCDImpl extends Impl with HasGCDTopIO {
     val io = IO(new GCDTopIO)
     withClockAndReset(clock, reset) {
-      // How many clock cycles in a PWM cycle?
-      val x = Reg(UInt(params.width.W))
-      val y = Wire(new DecoupledIO(UInt(params.width.W)))
-      val gcd = Wire(new DecoupledIO(UInt(params.width.W)))
-      val status = Wire(UInt(2.W))
+      val ax = Wire(new DecoupledIO(UInt(params.width.W)))
+      val res = Wire(new DecoupledIO(UInt((2 * params.width).W)))
+
+      val mem_addr_reg = Reg(UInt(log2Ceil(192).W))
+      val mem_write_data_reg = Reg(UInt(params.width.W))
+      val mem_write_en_reg = RegInit(false.B)
+      val dp_read_addr_reg = Reg(UInt(6.W))
+      val load_count_wire = Wire(new DecoupledIO(UInt(log2Ceil(33).W)))
 
       val impl_io = if (params.useBlackBox) {
-        val impl = Module(new GCDMMIOBlackBox(params.width))
-        impl.io
+        Module(new GCDMMIOBlackBox(params.width)).io
       } else {
-        val impl = Module(new GCDMMIOChiselModule(params.width))
-        impl.io
+        Module(new GCDMMIOChiselModule(params.width)).io
       }
 
       impl_io.clock := clock
       impl_io.reset := reset.asBool
 
-      impl_io.x := x
-      impl_io.y := y.bits
-      impl_io.input_valid := y.valid
-      y.ready := impl_io.input_ready
+      val status = Cat(impl_io.input_ready, impl_io.output_valid)
 
-      gcd.bits := impl_io.gcd
-      gcd.valid := impl_io.output_valid
-      impl_io.output_ready := gcd.ready
+      impl_io.ax := ax.bits
+      impl_io.input_valid := ax.valid
+      ax.ready := impl_io.input_ready
 
-      status := Cat(impl_io.input_ready, impl_io.output_valid)
+      res.bits := impl_io.res
+      res.valid := impl_io.output_valid
+      impl_io.output_ready := res.ready
+
       io.gcd_busy := impl_io.busy
 
+      impl_io.dp_read_addr := dp_read_addr_reg
+      impl_io.mem_addr := mem_addr_reg
+      impl_io.mem_write_data := mem_write_data_reg
+      impl_io.mem_write_en := mem_write_en_reg
+
+      load_count_wire.bits := impl_io.load_count
+      load_count_wire.valid := true.B
+
+      when (mem_write_en_reg) {
+        mem_write_en_reg := false.B
+      }
+
       node.regmap(
-        0x00 -> Seq(
-          RegField.r(2, status)), // a read-only register capturing current status
-        0x04 -> Seq(
-          RegField.w(params.width, x)), // a plain, write-only register
-        0x08 -> Seq(
-          RegField.w(params.width, y)), // write-only, y.valid is set on write
-        0x0C -> Seq(
-          RegField.r(params.width, gcd))) // read-only, gcd.ready is set on read
+        0x00 -> Seq(RegField.r(2, status, RegFieldDesc("status", "Status of the accelerator (input_ready, output_valid)."))),
+        0x04 -> Seq(RegField.w(params.width, ax, RegFieldDesc("ax", "Input data. Writing to this register triggers computation."))),
+        0x08 -> Seq(RegField.r((2 * params.width), res, RegFieldDesc("res", "Result of the computation."))),
+        // Assuming 32-bit width, res is 64-bit and takes up 0x08 and 0x0C
+        0x10 -> Seq(RegField.r(log2Ceil(33), load_count_wire, RegFieldDesc("load_count", "Number of vector sets loaded (0-33)."))),
+        0x14 -> Seq(RegField.w(log2Ceil(192), mem_addr_reg, RegFieldDesc("mem_addr", "Address for internal memory write operations (0-191)."))),
+        0x18 -> Seq(RegField.w(params.width, mem_write_data_reg, RegFieldDesc("mem_write_data", "Data to write to the internal memory at mem_addr."))),
+        0x1C -> Seq(RegField.w(1, mem_write_en_reg, RegFieldDesc("mem_write_en", "Pulse high to enable memory write operation."))),
+        0x20 -> Seq(RegField.w(6, dp_read_addr_reg, RegFieldDesc("dp_read_addr", "Address (0-33) of DP result to read via 'res' port.")))
+      )
     }
   }
 }
-// DOC include end: GCD router
 
 class HLSGCDAccel(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends ClockSinkDomain(ClockSinkParameters())(p) {
-  val device = new SimpleDevice("hlsgcdaccel", Seq("ucbbar,hlsgcdaccel")) 
+  val device = new SimpleDevice("hlsgcdaccel", Seq("ucbbar,hlsgcdaccel"))
   val node = TLRegisterNode(Seq(AddressSet(params.address, 4096-1)), device, "reg/control", beatBytes=beatBytes)
 
   override lazy val module = new HLSGCDAccelImpl
   class HLSGCDAccelImpl extends Impl with HasGCDTopIO {
     val io = IO(new GCDTopIO)
     withClockAndReset(clock, reset) {
-      val x = Reg(UInt(params.width.W))
-      val y = Wire(new DecoupledIO(UInt(params.width.W)))
-      val y_reg = Reg(UInt(params.width.W))
-      val gcd = Wire(new DecoupledIO(UInt(params.width.W)))
-      val gcd_reg = Reg(UInt(params.width.W))
-      val status = Wire(UInt(2.W))
+      val ax = Wire(new DecoupledIO(UInt(params.width.W)))
+      val res = Wire(new DecoupledIO(UInt((2 * params.width).W)))
 
       val impl = Module(new HLSGCDAccelBlackBox(params.width))
 
@@ -248,38 +267,30 @@ class HLSGCDAccel(params: GCDParams, beatBytes: Int)(implicit p: Parameters) ext
 
       val s_idle :: s_busy :: Nil = Enum(2)
       val state = RegInit(s_idle)
-      val result_valid = RegInit(false.B)
-      when (state === s_idle && y.valid) { 
+
+      when (state === s_idle && ax.valid) {
         state := s_busy
-        result_valid := false.B
-        y_reg := y.bits 
       } .elsewhen (state === s_busy && impl.io.ap_done) {
         state := s_idle
-        result_valid := true.B
-        gcd_reg := impl.io.ap_return
       }
 
-      impl.io.ap_start := state === s_busy
+      impl.io.ap_start := (state === s_idle && ax.valid)
+      res.valid := (state === s_busy && impl.io.ap_done)
 
-      gcd.valid := result_valid
-      status := Cat(impl.io.ap_idle, result_valid)
-      
-      impl.io.x := x
-      impl.io.y := y_reg
-      y.ready := impl.io.ap_idle
-      gcd.bits := gcd_reg
+      val status = Cat(impl.io.ap_idle, res.valid)
+
+      impl.io.ax := ax.bits
+      res.bits  := impl.io.ap_return
+
+      ax.ready := (state === s_idle)
 
       io.gcd_busy := !impl.io.ap_idle
 
       node.regmap(
-        0x00 -> Seq(
-          RegField.r(2, status)), // a read-only register capturing current status
-        0x04 -> Seq(
-          RegField.w(params.width, x)), // a plain, write-only register
-        0x08 -> Seq(
-          RegField.w(params.width, y)), // write-only, y.valid is set on write
-        0x0C -> Seq(
-          RegField.r(params.width, gcd))) // read-only, gcd.ready is set on read
+        0x00 -> Seq(RegField.r(2, status)),
+        0x04 -> Seq(RegField.w(params.width, ax)),
+        0x08 -> Seq(RegField.r((2 * params.width), res))
+      )
     }
   }
 }
@@ -287,108 +298,74 @@ class HLSGCDAccel(params: GCDParams, beatBytes: Int)(implicit p: Parameters) ext
 // DOC include start: GCD lazy trait
 trait CanHavePeripheryGCD { this: BaseSubsystem =>
   private val portName = "gcd"
-
   private val pbus = locateTLBusWrapper(PBUS)
 
-  // Only build if we are using the TL (nonAXI4) version
-  val (gcd_busy, gcd_clock) = p(GCDKey) match {
-    case Some(params) => {
-
-      // If externallyClocked is true, create an input port for the GCD clock.
-      // This clock is distinct from the pbus clock or other internal clocks.
-      // It's defined within InModuleBody as it's a hardware port.
-      val gcd_clock = Option.when(params.externallyClocked) {
-        InModuleBody { IO(Input(Clock())).suggestName("gcd_clock_in") }
-      }
-      // Define the clock source node for the GCD module.
-      val gcdClockNode = if (params.externallyClocked) {
-        // If externally clocked, create a new ClockSourceNode. 
-        // This node acts as the root of the GCD's independent clock domain.
-        val gcdSourceClockNode = ClockSourceNode(Seq(ClockSourceParameters()))
-        InModuleBody {
-          // Connect the ClockSourceNode's output clock to the external gcd_clock input.
-          gcdSourceClockNode.out(0)._1.clock := gcd_clock.get
-          // The reset signal for the GCD's clock domain must be synchronous to the gcd_clock.
-          // ResetCatchAndSync synchronizes the asynchronous pbus reset to the gcd_clock domain.
-          gcdSourceClockNode.out(0)._1.reset := ResetCatchAndSync(gcd_clock.get, pbus.module.reset.asBool)
-        }
-        gcdSourceClockNode
-      } else {
-        // If not externally clocked, the GCD runs on the same clock as the pbus.
-        pbus.fixedClockNode
-      }
-      // Define the type of clock crossing required between the pbus and the GCD module.
-      val gcdCrossing = if (params.externallyClocked) {
-        // If the GCD has its own clock, an AsynchronousCrossing is necessary
-        // to safely transfer data between the pbus clock domain and the GCD clock domain.
-        AsynchronousCrossing()
-      } else {
-        // If the GCD uses the pbus clock, a SynchronousCrossing can be used.
-        SynchronousCrossing()
-      }
-
-      // Instantiate the GCD module (either TL, AXI4, or HLS variant)
-      val gcd = if (params.useAXI4) {
-        val gcd = LazyModule(new GCDAXI4(params, pbus.beatBytes)(p))
-        // Connect the GCD's clock input to our determined gcdClockNode.
-        gcd.clockNode := gcdClockNode
-        // Couple the GCD to the pbus, inserting the necessary clock crossing logic.
-        pbus.coupleTo(portName) {
-          // AXI4InwardClockCrossingHelper handles crossing details for AXI4.
-          AXI4InwardClockCrossingHelper("gcd_crossing", gcd, gcd.node)(gcdCrossing) :=
-          AXI4Buffer () :=
-          TLToAXI4 () :=
-          // toVariableWidthSlave doesn't use holdFirstDeny, which TLToAXI4() needs
-          TLFragmenter(pbus.beatBytes, pbus.blockBytes, holdFirstDeny = true) := _
-        }
-        gcd
-      } else if (params.useHLS) {
-        val gcd = LazyModule(new HLSGCDAccel(params, pbus.beatBytes)(p))
-        // Connect the GCD's clock input to our determined gcdClockNode.
-        gcd.clockNode := gcdClockNode
-        // Couple the GCD to the pbus, inserting the necessary clock crossing logic.
-        pbus.coupleTo(portName) {
-          // TLInwardClockCrossingHelper handles crossing details for TileLink.
-          TLInwardClockCrossingHelper("gcd_crossing", gcd, gcd.node)(gcdCrossing) :=
-          TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _
-        }
-        gcd
-      } else {
-        val gcd = LazyModule(new GCDTL(params, pbus.beatBytes)(p))
-        // Connect the GCD's clock input to our determined gcdClockNode.
-        gcd.clockNode := gcdClockNode
-        // Couple the GCD to the pbus, inserting the necessary clock crossing logic.
-        pbus.coupleTo(portName) {
-          // TLInwardClockCrossingHelper handles crossing details for TileLink.
-          TLInwardClockCrossingHelper("gcd_crossing", gcd, gcd.node)(gcdCrossing) :=
-          TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _
-        }
-        gcd
-      }
-      // Expose the GCD's busy signal.
-      val gcd_busy = InModuleBody {
-        val busy = IO(Output(Bool())).suggestName("gcd_busy")
-        busy := gcd.module.io.gcd_busy
-        busy
-      }
-      // Return the busy signal (always needed if GCD exists) and the optional external clock input.
-      // The Option[Clock] allows the IOBinder (WithGCDIOPunchthrough) to conditionally
-      // create the top-level clock input only when `externallyClocked` is true.
-      // The busy signal is Some(busy) because the entire GCD peripheral itself is optional based on GCDKey.
-      (Some(gcd_busy), gcd_clock)
+  private val periphery_port_info = p(GCDKey).map { params =>
+    val gcd_clock_source = Option.when(params.externallyClocked) {
+      InModuleBody { IO(Input(Clock())).suggestName("gcd_clock_in") }
     }
-    // If GCDKey is None, the GCD peripheral is not instantiated. Return None for both signals.
-    case None => (None, None)
+    val gcdClockNode = if (params.externallyClocked) {
+      val gcdSourceClockNode = ClockSourceNode(Seq(ClockSourceParameters()))
+      InModuleBody {
+        gcdSourceClockNode.out(0)._1.clock := gcd_clock_source.get
+        gcdSourceClockNode.out(0)._1.reset := ResetCatchAndSync(gcd_clock_source.get, pbus.module.reset.asBool)
+      }
+      gcdSourceClockNode
+    } else {
+      pbus.fixedClockNode
+    }
+    val gcdCrossing = if (params.externallyClocked) {
+      AsynchronousCrossing()
+    } else {
+      SynchronousCrossing()
+    }
+
+    val gcd = if (params.useAXI4) {
+      val gcd = LazyModule(new GCDAXI4(params, pbus.beatBytes)(p))
+      gcd.clockNode := gcdClockNode
+      pbus.coupleTo(portName) {
+        AXI4InwardClockCrossingHelper("gcd_crossing", gcd, gcd.node)(gcdCrossing) :=
+        AXI4Buffer () :=
+        TLToAXI4 () :=
+        TLFragmenter(pbus.beatBytes, pbus.blockBytes, holdFirstDeny = true) := _
+      }
+      gcd
+    } else if (params.useHLS) {
+      val gcd = LazyModule(new HLSGCDAccel(params, pbus.beatBytes)(p))
+      gcd.clockNode := gcdClockNode
+      pbus.coupleTo(portName) {
+        TLInwardClockCrossingHelper("gcd_crossing", gcd, gcd.node)(gcdCrossing) :=
+        TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _
+      }
+      gcd
+    } else {
+      val gcd = LazyModule(new GCDTL(params, pbus.beatBytes)(p))
+      gcd.clockNode := gcdClockNode
+      pbus.coupleTo(portName) {
+        TLInwardClockCrossingHelper("gcd_crossing", gcd, gcd.node)(gcdCrossing) :=
+        TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _
+      }
+      gcd
+    }
+
+    val busy_signal = InModuleBody {
+      val top_level_busy_io = IO(Output(Bool())).suggestName("gcd_busy")
+      top_level_busy_io := gcd.module.io.gcd_busy
+      top_level_busy_io
+    }
+    (busy_signal, gcd_clock_source)
   }
+
+  lazy val gcd_busy = periphery_port_info.map(_._1)
+  lazy val gcd_clock = periphery_port_info.flatMap(_._2)
 }
 // DOC include end: GCD lazy trait
 
 // DOC include start: GCD config fragment
-class WithGCD(useAXI4: Boolean = false, useBlackBox: Boolean = false, useHLS: Boolean = false, externallyClocked: Boolean = false) extends Config((site, here, up) => {
+class WithGCD(useAXI4: Boolean = true, useBlackBox: Boolean = true, useHLS: Boolean = false, externallyClocked: Boolean = false) extends Config((site, here, up) => {
   case GCDKey => {
-    // useHLS cannot be used with useAXI4 and useBlackBox
     assert(!useHLS || (useHLS && !useAXI4 && !useBlackBox))
-    Some(GCDParams(useAXI4 = useAXI4, useBlackBox = useBlackBox, useHLS = useHLS, externallyClocked = externallyClocked))
+    Some(GCDParams(useAXI4 = false, useBlackBox = useBlackBox, useHLS = useHLS, externallyClocked = externallyClocked))
   }
 })
 // DOC include end: GCD config fragment

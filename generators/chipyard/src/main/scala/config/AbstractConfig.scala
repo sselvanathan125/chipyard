@@ -82,7 +82,7 @@ class AbstractConfig extends Config(
 
   // MMIO device section
   new chipyard.config.WithUART ++                                  /** add a UART */
-
+//  new chipyard.example.WithGCD ++
 
   // ================================================
   //   Set up Debug/Bringup/Testing Features
