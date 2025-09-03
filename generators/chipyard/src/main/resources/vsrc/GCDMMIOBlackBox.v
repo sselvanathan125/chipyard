@@ -27,7 +27,6 @@ module GCDMMIOBlackBox
                S_SQRT_ITER          = 8'b01000000,
                S_STORE_RESULT       = 8'b10000000,
                S_RESULT_READY       = 8'b00000011;
-               // S_WAIT_ACK_LOW, S_DONE_WAIT_HIGH, and S_DONE_WAIT_LOW are removed.
 
     reg [7:0] state;
 
