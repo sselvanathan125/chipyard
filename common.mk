@@ -1,11 +1,20 @@
-SHELL=/bin/bash
-SED ?= sed
 
-ifndef RISCV
-$(error RISCV is unset. Did you source the Chipyard auto-generated env file (which activates the default conda environment)?)
-else
-$(info Running with RISCV=$(RISCV))
-endif
+# Note: Individual rules that use RISCV or external tools perform local checks to avoid
+# blocking unrelated targets. Use $(require_riscv) and $(call require_cmd,<tool>) inside recipes.
+
+
+define require_riscv
+	@if [ -z "$(RISCV)" ]; then \
+	  echo "RISCV is unset. Source env.sh (which activates the default conda env) before building sims." 1>&2; \
+	  exit 1; \
+	fi
+endef
+
+# Verify a tool is present in PATH; usage: $(call require_cmd,verilator)
+define require_cmd
+	@command -v $(1) >/dev/null 2>&1 \
+		|| { echo "Error: $(1) not found in PATH. Set up your tool environment before building this target." >&2; exit 1; }
+endef
 
 #########################################################################################
 # specify user-interface variables
@@ -58,6 +67,7 @@ HELP_COMMANDS += \
 "   firrtl                      = generate intermediate firrtl files from chisel elaboration" \
 "   run-tests                   = run all assembly and benchmark tests" \
 "   launch-sbt                  = start sbt terminal" \
+"   find-configs                = list Chipyard Config classes (eligible CONFIG=)" \
 "   find-config-fragments       = list all config. fragments" \
 "   check-submodule-status      = check that all submodules in generators/ have been initialized"
 
@@ -65,13 +75,16 @@ HELP_COMMANDS += \
 # include additional subproject make fragments
 # see HELP_COMPILATION_VARIABLES
 #########################################################################################
-include $(base_dir)/generators/cva6/cva6.mk
-include $(base_dir)/generators/ibex/ibex.mk
-include $(base_dir)/generators/ara/ara.mk
 include $(base_dir)/generators/tracegen/tracegen.mk
-include $(base_dir)/generators/nvdla/nvdla.mk
-include $(base_dir)/generators/radiance/radiance.mk
 include $(base_dir)/tools/torture.mk
+# Optional generator make fragments should not fail build if absent
+-include $(base_dir)/generators/cva6/cva6.mk
+-include $(base_dir)/generators/ibex/ibex.mk
+-include $(base_dir)/generators/nvdla/nvdla.mk
+-include $(base_dir)/generators/radiance/radiance.mk
+# Wildcard include for standardized per-generator make fragments
+-include $(wildcard $(base_dir)/generators/*/chipyard.mk)
+
 
 #########################################################################################
 # Prerequisite lists
@@ -87,7 +100,7 @@ endif
 # Returns a list of files in directories $1 with *any* of the file extensions in $2
 lookup_srcs_by_multiple_type = $(foreach type,$(2),$(call lookup_srcs,$(1),$(type)))
 
-CHECK_SUBMODULES_COMMAND = echo "Checking all submodules in generators/ are initialized. Uninitialized submodules will be displayed" ; ! git submodule status $(base_dir)/generators | grep ^-
+CHECK_SUBMODULES_COMMAND = echo "Checking required submodules in generators/ are initialized. Uninitialized submodules will be displayed" ; ! git submodule status $(base_dir)/generators | grep '^-.*' | grep -vE "(ara|caliptra|compress|mempress|saturn)"
 
 SCALA_EXT = scala
 VLOG_EXT = sv v
@@ -184,23 +197,24 @@ else
 endif
 
 $(SFC_MFC_TARGETS) &: $(FIRRTL_FILE) $(FINAL_ANNO_FILE) $(MFC_LOWERING_OPTIONS)
+	$(call require_cmd,$(FIRTOOL_BIN))
 	rm -rf $(GEN_COLLATERAL_DIR)
-	(set -o pipefail && firtool \
-		--format=fir \
-		--export-module-hierarchy \
-		--verify-each=true \
-		--warn-on-unprocessed-annotations \
-		--disable-annotation-classless \
-		--disable-annotation-unknown \
-		--mlir-timing \
-		--lowering-options=$(shell cat $(MFC_LOWERING_OPTIONS)) \
-		--repl-seq-mem \
-		--repl-seq-mem-file=$(MFC_SMEMS_CONF) \
-		--annotation-file=$(FINAL_ANNO_FILE) \
-		--split-verilog \
-		-o $(GEN_COLLATERAL_DIR) \
-		$(FIRRTL_FILE) |& tee $(FIRTOOL_LOG_FILE))
-	$(SED) -i 's/.*/& /' $(MFC_SMEMS_CONF) # need trailing space for SFC macrocompiler
+	(set -o pipefail && $(FIRTOOL_BIN) \
+			--format=fir \
+			--export-module-hierarchy \
+			--verify-each=true \
+			--warn-on-unprocessed-annotations \
+			--disable-annotation-classless \
+			--disable-annotation-unknown \
+			--mlir-timing \
+			--lowering-options=$(shell cat $(MFC_LOWERING_OPTIONS)) \
+			--repl-seq-mem \
+			--repl-seq-mem-file=$(MFC_SMEMS_CONF) \
+			--annotation-file=$(FINAL_ANNO_FILE) \
+			--split-verilog \
+			-o $(GEN_COLLATERAL_DIR) \
+			$(FIRRTL_FILE) |& tee $(FIRTOOL_LOG_FILE))
+	$(SED) $(SED_INPLACE) 's/.*/& /' $(MFC_SMEMS_CONF) # need trailing space for SFC macrocompiler
 	touch $(MFC_BB_MODS_FILELIST) # if there are no BB's then the file might not be generated, instead always generate it
 # DOC include end: FirrtlCompiler
 
@@ -218,9 +232,9 @@ $(TOP_MODS_FILELIST) $(MODEL_MODS_FILELIST) $(ALL_MODS_FILELIST) $(BB_MODS_FILEL
 		--out-model-hier-json $(MFC_MODEL_HRCHY_JSON_UNIQUIFIED) \
 		--gcpath $(GEN_COLLATERAL_DIR)
 	$(SED) -e 's;^;$(GEN_COLLATERAL_DIR)/;' $(MFC_BB_MODS_FILELIST) > $(BB_MODS_FILELIST)
-	$(SED) -i 's/\.\///' $(TOP_MODS_FILELIST)
-	$(SED) -i 's/\.\///' $(MODEL_MODS_FILELIST)
-	$(SED) -i 's/\.\///' $(BB_MODS_FILELIST)
+	$(SED) $(SED_INPLACE) 's/\.\///' $(TOP_MODS_FILELIST)
+	$(SED) $(SED_INPLACE) 's/\.\///' $(MODEL_MODS_FILELIST)
+	$(SED) $(SED_INPLACE) 's/\.\///' $(BB_MODS_FILELIST)
 	sort -u $(TOP_MODS_FILELIST) $(MODEL_MODS_FILELIST) $(BB_MODS_FILELIST) > $(ALL_MODS_FILELIST)
 
 $(TOP_SMEMS_CONF) $(MODEL_SMEMS_CONF) &:  $(MFC_SMEMS_CONF) $(MFC_MODEL_HRCHY_JSON_UNIQUIFIED)
@@ -390,8 +404,10 @@ run-binary-fast-hex: override SIM_FLAGS += +loadmem=$(BINARY)
 $(output_dir):
 	mkdir -p $@
 
+ifdef RISCV
 $(output_dir)/%: $(RISCV)/riscv64-unknown-elf/share/riscv-tests/isa/% | $(output_dir)
 	ln -sf $< $@
+endif
 
 $(output_dir)/%.run: $(output_dir)/% $(SIM_PREREQ)
 	(set -o pipefail && $(NUMA_PREFIX) $(sim) $(PERMISSIVE_ON) $(call get_common_sim_flags,$<) $(PERMISSIVE_OFF)  $< </dev/null | tee $<.log) && touch $@
@@ -435,6 +451,10 @@ endef
 .PHONY: find-config-fragments
 find-config-fragments:
 	$(call run_scala_main,chipyard,chipyard.ConfigFinder,)
+
+.PHONY: find-configs
+find-configs:
+	$(call run_scala_main,chipyard,chipyard.ChipyardConfigFinder,)
 
 .PHONY: help
 help:
