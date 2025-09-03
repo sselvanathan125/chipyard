@@ -58,7 +58,7 @@ module GCDMMIOBlackBox
     assign output_valid = (state == S_RESULT_READY);
     assign busy = (state != S_IDLE);
 
-    // Wires for SQRT logic
+    // Wires for SQ_RT logic
     wire [(2*WIDTH)-1:0] y_ref = {sqrt_remainder[(2*WIDTH)-3:0], sqrt_operand[(2*WIDTH)-1:(2*WIDTH)-2]};
     wire [(2*WIDTH)-1:0] r_ref = {sqrt_root, 2'b01};
 
@@ -111,7 +111,7 @@ module GCDMMIOBlackBox
                 state <= S_RESULT_READY;
             end
             S_RESULT_READY: if (output_ready) begin
-                if (batch_idx == 5) begin  //State change to Reset in last batch
+                if (batch_idx == 5) begin 
                     state <= S_IDLE;
                     load_idx <= 0;
                     load_count <= 0;
@@ -126,7 +126,7 @@ module GCDMMIOBlackBox
       end
     end
 
-    // Combinational read logic for memory
+    // Combinational logic read logic for memory
     always @(*) begin
         if (dp_read_addr < 6) res = batch_results[dp_read_addr];
         else res = 0;
