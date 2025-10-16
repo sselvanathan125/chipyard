@@ -32,23 +32,17 @@ case class GCDParams(
 case object GCDKey extends Field[Option[GCDParams]](None)
 // DOC include end: GCD key
 
-// Modified GCDIO to remove extra data inputs
 class GCDIO(val w: Int) extends Bundle {
-  val clock = Input(Clock())
-  val reset = Input(Bool())
-  val input_ready = Output(Bool())
-  val input_valid = Input(Bool())
-  val ax = Input(UInt(w.W))
+  val clock        = Input(Clock())
+  val reset        = Input(Bool())
+  val input_ready  = Output(Bool())
+  val input_valid  = Input(Bool())
+  val ax           = Input(UInt(w.W))
+  val read_addr    = Input(UInt(5.W))      // for selecting which result to read
   val output_ready = Input(Bool())
   val output_valid = Output(Bool())
-  val res = Output(UInt((2 * w).W))
-  val dp_read_addr = Input(UInt(6.W))
-
-  val mem_addr = Input(UInt(log2Ceil(192).W))
-  val mem_write_data = Input(UInt(w.W))
-  val mem_write_en = Input(Bool())
-  val load_count = Output(UInt(6.W))
-  val busy = Output(Bool())
+  val res          = Output(UInt(w.W))
+  val busy         = Output(Bool())
 }
 
 class HLSGCDAccelIO(val w: Int) extends Bundle {
@@ -74,31 +68,28 @@ trait HasGCDTopIO {
 class GCDMMIOBlackBox(val w: Int) extends BlackBox(Map("WIDTH" -> IntParam(w))) with HasBlackBoxResource {
   val io = IO(new GCDIO(w))
   addResource("/vsrc/GCDMMIOBlackBox.v")
+  addResource("/vsrc/Subsystem.v")
+  addResource("/vsrc/nfp_exp_single.v")
 }
 // DOC include end: GCD blackbox
 
 // DOC include start: GCD chisel
-// This Chisel module is a placeholder, the logic is simplified to pass 'ax' through
+// This Chisel module is a placeholder, the logic is simplified
 class GCDMMIOChiselModule(val w: Int) extends Module {
   val io = IO(new GCDIO(w))
   val s_idle :: s_done :: Nil = Enum(2)
 
   val state = RegInit(s_idle)
-  val res_reg = Reg(UInt((2*w).W))
+  val res_reg = Reg(UInt(w.W))
 
   io.input_ready := state === s_idle
   io.output_valid := state === s_done
   io.res := res_reg
-
-  // Dummy connections for other ports
-  io.mem_addr := 0.U
-  io.mem_write_data := 0.U
-  io.mem_write_en := false.B
-  io.load_count := 0.U
+  io.read_addr := 0.U // Tie-off new port
 
   when (state === s_idle && io.input_valid) {
     state := s_done
-    res_reg := io.ax // Pass input 'ax' to result register
+    res_reg := io.ax
   } .elsewhen (state === s_done && io.output_ready) {
     state := s_idle
   }
@@ -114,11 +105,9 @@ class HLSGCDAccelBlackBox(val w: Int) extends BlackBox with HasBlackBoxPath {
   val chipyardDir = System.getProperty("user.dir")
   val hlsDir = s"$chipyardDir/generators/chipyard"
 
-  // Run HLS command
   val make = s"make -C ${hlsDir}/src/main/resources/hls default"
   require (make.! == 0, "Failed to run HLS")
 
-  // Add each vlog file
   addPath(s"$hlsDir/src/main/resources/vsrc/HLSGCDAccelBlackBox.v")
   addPath(s"$hlsDir/src/main/resources/vsrc/HLSGCDAccelBlackBox_flow_control_loop_pipe.v")
 }
@@ -134,51 +123,35 @@ class GCDTL(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends C
     val io = IO(new GCDTopIO)
     withClockAndReset(clock, reset) {
       val ax = Wire(new DecoupledIO(UInt(params.width.W)))
-      val res = Wire(new DecoupledIO(UInt((2 * params.width).W)))
-      val dp_read_addr_reg = Reg(UInt(6.W))
-      val mem_addr_reg = Reg(UInt(log2Ceil(192).W))
-      val mem_write_data_reg = Reg(UInt(params.width.W))
-      val mem_write_en_reg = RegInit(false.B)
-      val load_count_wire = Wire(new DecoupledIO(UInt(6.W)))
+      val res = Wire(new DecoupledIO(UInt(params.width.W)))
+      
+      // CHANGED: Added register for the new read_addr port
+      val read_addr_reg = Reg(UInt(5.W))
 
       val impl_io = Module(new GCDMMIOBlackBox(params.width)).io
       impl_io.clock := clock
       impl_io.reset := reset.asBool
       val status = Cat(impl_io.input_ready, impl_io.output_valid)
       
-      // Connect input, valid is triggered by write to 'ax' register
       impl_io.ax := ax.bits
       impl_io.input_valid := ax.valid
       ax.ready := impl_io.input_ready
 
-      impl_io.dp_read_addr := dp_read_addr_reg
+      // CHANGED: Connect the new read_addr register to the blackbox
+      impl_io.read_addr := read_addr_reg
 
       res.bits := impl_io.res
       res.valid := impl_io.output_valid
       impl_io.output_ready := res.ready
 
       io.gcd_busy := impl_io.busy
-      impl_io.mem_addr := mem_addr_reg
-      impl_io.mem_write_data := mem_write_data_reg
-      impl_io.mem_write_en := mem_write_en_reg
-      load_count_wire.bits := impl_io.load_count
-      load_count_wire.valid := true.B
 
-      when (mem_write_en_reg) {
-        mem_write_en_reg := false.B
-      }
-
-      // Define the memory map
       node.regmap(
-        0x00 -> Seq(RegField.r(2, status)),
-        0x04 -> Seq(RegField.w(params.width, ax)),
-        0x08 -> Seq(RegField.r((2 * params.width), res)),
-        // Assuming 32-bit width, res is 64-bit and takes up 0x08 and 0x0C
-        0x10 -> Seq(RegField.r(6, load_count_wire)),
-        0x14 -> Seq(RegField.w(log2Ceil(192), mem_addr_reg)),
-        0x18 -> Seq(RegField.w(params.width, mem_write_data_reg)),
-        0x1C -> Seq(RegField.w(1, mem_write_en_reg)),
-        0x20 -> Seq(RegField.w(6, dp_read_addr_reg, RegFieldDesc("dp_read_addr", "Address (0-33) of DP result to read via 'res' port.")))
+        0x00 -> Seq(RegField.r(2, status, RegFieldDesc("status", "Status bits: {input_ready, output_valid}"))),
+        0x04 -> Seq(RegField.w(params.width, ax, RegFieldDesc("ax", "Input data. Writing triggers computation."))),
+        0x08 -> Seq(RegField.r(params.width, res, RegFieldDesc("res", "Result of the computation."))),
+        // NEW REGISTER: Writable register to control which result is read.
+        0x10 -> Seq(RegField.w(5, read_addr_reg, RegFieldDesc("read_addr", "Address (0-31) of internal result to read via 'res' port.")))
       )
     }
   }
@@ -193,13 +166,10 @@ class GCDAXI4(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends
     val io = IO(new GCDTopIO)
     withClockAndReset(clock, reset) {
       val ax = Wire(new DecoupledIO(UInt(params.width.W)))
-      val res = Wire(new DecoupledIO(UInt((2 * params.width).W)))
+      val res = Wire(new DecoupledIO(UInt(params.width.W)))
 
-      val mem_addr_reg = Reg(UInt(log2Ceil(192).W))
-      val mem_write_data_reg = Reg(UInt(params.width.W))
-      val mem_write_en_reg = RegInit(false.B)
-      val dp_read_addr_reg = Reg(UInt(6.W))
-      val load_count_wire = Wire(new DecoupledIO(UInt(log2Ceil(33).W)))
+      // CHANGED: Added register for the new read_addr port
+      val read_addr_reg = Reg(UInt(5.W))
 
       val impl_io = if (params.useBlackBox) {
         Module(new GCDMMIOBlackBox(params.width)).io
@@ -215,6 +185,9 @@ class GCDAXI4(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends
       impl_io.ax := ax.bits
       impl_io.input_valid := ax.valid
       ax.ready := impl_io.input_ready
+      
+      // CHANGED: Connect the new read_addr register to the blackbox
+      impl_io.read_addr := read_addr_reg
 
       res.bits := impl_io.res
       res.valid := impl_io.output_valid
@@ -222,28 +195,11 @@ class GCDAXI4(params: GCDParams, beatBytes: Int)(implicit p: Parameters) extends
 
       io.gcd_busy := impl_io.busy
 
-      impl_io.dp_read_addr := dp_read_addr_reg
-      impl_io.mem_addr := mem_addr_reg
-      impl_io.mem_write_data := mem_write_data_reg
-      impl_io.mem_write_en := mem_write_en_reg
-
-      load_count_wire.bits := impl_io.load_count
-      load_count_wire.valid := true.B
-
-      when (mem_write_en_reg) {
-        mem_write_en_reg := false.B
-      }
-
       node.regmap(
-        0x00 -> Seq(RegField.r(2, status, RegFieldDesc("status", "Status of the accelerator (input_ready, output_valid)."))),
-        0x04 -> Seq(RegField.w(params.width, ax, RegFieldDesc("ax", "Input data. Writing to this register triggers computation."))),
-        0x08 -> Seq(RegField.r((2 * params.width), res, RegFieldDesc("res", "Result of the computation."))),
-        // Assuming 32-bit width, res is 64-bit and takes up 0x08 and 0x0C
-        0x10 -> Seq(RegField.r(log2Ceil(33), load_count_wire, RegFieldDesc("load_count", "Number of vector sets loaded (0-33)."))),
-        0x14 -> Seq(RegField.w(log2Ceil(192), mem_addr_reg, RegFieldDesc("mem_addr", "Address for internal memory write operations (0-191)."))),
-        0x18 -> Seq(RegField.w(params.width, mem_write_data_reg, RegFieldDesc("mem_write_data", "Data to write to the internal memory at mem_addr."))),
-        0x1C -> Seq(RegField.w(1, mem_write_en_reg, RegFieldDesc("mem_write_en", "Pulse high to enable memory write operation."))),
-        0x20 -> Seq(RegField.w(6, dp_read_addr_reg, RegFieldDesc("dp_read_addr", "Address (0-33) of DP result to read via 'res' port.")))
+        0x00 -> Seq(RegField.r(2, status, RegFieldDesc("status", "Status of the accelerator."))),
+        0x04 -> Seq(RegField.w(params.width, ax, RegFieldDesc("ax", "Input data."))),
+        0x08 -> Seq(RegField.r(params.width, res, RegFieldDesc("res", "Result data."))),
+        0x10 -> Seq(RegField.w(5, read_addr_reg, RegFieldDesc("read_addr", "Address of internal result to read.")))
       )
     }
   }
@@ -369,3 +325,4 @@ class WithGCD(useAXI4: Boolean = true, useBlackBox: Boolean = true, useHLS: Bool
   }
 })
 // DOC include end: GCD config fragment
+

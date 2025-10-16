@@ -1,135 +1,135 @@
+//Only Exp function // removed sq and sq functions
+//TODO use exp o/p to get cosh and sinh
 module GCDMMIOBlackBox
  #(parameter WIDTH = 32)
  (
-   input               clock,
-   input               reset,
-   output              input_ready,
-   input               input_valid,
-   input [WIDTH-1:0]   ax,
-   input               output_ready,     
-   output              output_valid,      
-   output reg [(2*WIDTH)-1:0] res,
-   output              busy,
-   input  [$clog2(192)-1:0] mem_addr,
-   input  [WIDTH-1:0]   mem_write_data,
-   input               mem_write_en,
-   output reg [7:0]      load_count,
-   input [5:0]           dp_read_addr
+    input                       clock,
+    input                       reset,
+
+    // AXI-Lite Style Slave Interface (from CPU)
+    output                      input_ready,
+    input                       input_valid,
+    input      [WIDTH-1:0]      ax,
+    input      [4:0]            read_addr,
+    input                       output_ready,
+    output                      output_valid,
+    output     [WIDTH-1:0]      res,
+    output                      busy
  );
 
-    // FSM States-local data
-    localparam S_IDLE               = 8'b00000001,
-               S_LOADING            = 8'b00000010,
-               S_BATCH_START        = 8'b00000100,
-               S_COMPUTE_SQUARE     = 8'b00001000,
-               S_COMPUTE_WAIT       = 8'b00010000,
-               S_SQRT_START         = 8'b00100000,
-               S_SQRT_ITER          = 8'b01000000,
-               S_STORE_RESULT       = 8'b10000000,
-               S_RESULT_READY       = 8'b00000011;
-               // S_WAIT_ACK_LOW, S_DONE_WAIT_HIGH, and S_DONE_WAIT_LOW are removed.
+    localparam S_IDLE            = 5'b00001,
+               S_PRIME_START     = 5'b00010, //to start the flush cycle
+               S_PRIME_WAIT      = 5'b00100, //to wait 
+               S_COMPUTE_START   = 5'b01000,
+               S_COMPUTE_WAIT    = 5'b10000,
+               S_COMPUTE_LATCH   = 5'b10001, 
+               S_RESULTS_READY   = 5'b10010;
 
-    reg [7:0] state;
+    reg [4:0] state;
 
-    // Internal Reg and Mem
-    reg [7:0] load_idx;
-    reg [2:0] batch_idx;
-    reg [WIDTH-1:0]   internal_mem [0:191];
-    reg [(2*WIDTH)-1:0] squared_results [0:31];
-    reg [WIDTH-1:0]   batch_results [0:5];
-    reg [(2*WIDTH)-1:0] sqrt_operand;
-    reg [(2*WIDTH)-1:0] sqrt_remainder;
-    reg [WIDTH-1:0]   sqrt_root;
-    reg [5:0]         sqrt_iter_count;
-    integer i;
+    // Internal memory and counters
+    reg [WIDTH-1:0] internal_mem[0:31];
+    reg [4:0]       load_idx;
+    reg [4:0]       compute_idx;
 
-    // Wire connected adder tree 
-    wire [(2*WIDTH)-1:0] parallel_sum =
-        squared_results[0]  + squared_results[1]  + squared_results[2]  + squared_results[3] +
-        squared_results[4]  + squared_results[5]  + squared_results[6]  + squared_results[7] +
-        squared_results[8]  + squared_results[9]  + squared_results[10] + squared_results[11] +
-        squared_results[12] + squared_results[13] + squared_results[14] + squared_results[15] +
-        squared_results[16] + squared_results[17] + squared_results[18] + squared_results[19] +
-        squared_results[20] + squared_results[21] + squared_results[22] + squared_results[23] +
-        squared_results[24] + squared_results[25] + squared_results[26] + squared_results[27] +
-        squared_results[28] + squared_results[29] + squared_results[30] + squared_results[31];
+    // Latency 
+    localparam EXP_LATENCY = 30; // Total latency 30
 
-    // I/O Assignments
-    assign input_ready = (state == S_IDLE) || (state == S_LOADING);
-    assign output_valid = (state == S_RESULT_READY);
-    assign busy = (state != S_IDLE);
+    // Wires and registers
+    reg [WIDTH-1:0] exp_in;
+    reg             exp_enable;
+    wire [WIDTH-1:0] exp_out;
+    reg [WIDTH-1:0] exp_results[0:31];
+    reg [4:0]       latency_counter;
 
-    // Wires for SQRT logic
-    wire [(2*WIDTH)-1:0] y_ref = {sqrt_remainder[(2*WIDTH)-3:0], sqrt_operand[(2*WIDTH)-1:(2*WIDTH)-2]};
-    wire [(2*WIDTH)-1:0] r_ref = {sqrt_root, 2'b01};
+    // instantiate the MATLAB-generated exp function 
+    Subsystem exp_unit (
+        .clk(clock),
+        .reset(reset),
+        .clk_enable(exp_enable),
+        .In1(exp_in),
+        .ce_out(),
+        .Out1(exp_out)
+    );
 
-    // FSM Logic
+    // Handshake and O/p 
+    assign input_ready  = (state == S_IDLE);
+    assign output_valid = (state == S_RESULTS_READY);
+    assign busy         = (state != S_IDLE);
+    assign res          = exp_results[read_addr];
+
+    // FSM 
     always @(posedge clock or posedge reset) begin
-      if (reset) begin
-        state <= S_IDLE;
-        load_idx <= 0;
-        load_count <= 0;
-        batch_idx <= 0;
-      end else begin
-          case (state)
-            S_IDLE: if (input_valid) begin
-                internal_mem[0] <= ax;
-                load_idx <= 1; load_count <= 1; state <= S_LOADING;
-            end
-            S_LOADING: if (load_idx == 192) begin
-                state <= S_BATCH_START;
-            end else if (input_valid) begin
-                internal_mem[load_idx] <= ax;
-                load_idx <= load_idx + 1; load_count <= load_count + 1;
-            end
-            S_BATCH_START: state <= S_COMPUTE_SQUARE;
-            S_COMPUTE_SQUARE: begin
-                for (i = 0; i < 32; i = i + 1)
-                    squared_results[i] <= internal_mem[batch_idx * 32 + i] * internal_mem[batch_idx * 32 + i];
-                state <= S_COMPUTE_WAIT;
-            end
-            S_COMPUTE_WAIT: state <= S_SQRT_START; 
-            S_SQRT_START: begin
-                sqrt_operand <= parallel_sum;         //TODO simplify SQ ROOT in few cycles
-                sqrt_remainder <= 0;
-                sqrt_root <= 0;
-                sqrt_iter_count <= 0;
-                state <= S_SQRT_ITER;
-            end
-            S_SQRT_ITER: begin
-                sqrt_operand <= sqrt_operand << 2;
-                if (y_ref >= r_ref) begin
-                    sqrt_remainder <= y_ref - r_ref; sqrt_root <= {sqrt_root[(WIDTH-2):0], 1'b1};
-                end else begin
-                    sqrt_remainder <= y_ref; sqrt_root <= {sqrt_root[(WIDTH-2):0], 1'b0};
+        if (reset) begin
+            state <= S_IDLE;
+            load_idx <= 0;
+            compute_idx <= 0;
+            latency_counter <= 0;
+            exp_enable <= 1'b0;
+        end else begin
+            case (state)
+                S_IDLE: begin
+                    if (input_valid) begin
+                        internal_mem[load_idx] <= ax;
+                        if (load_idx == 31) begin
+                            state <= S_PRIME_START; // All data loaded, start priming
+                            exp_enable <= 1'b1;     // Enable the unit
+                            load_idx <= 0;          // Reset for next run
+                        end else begin
+                            load_idx <= load_idx + 1;
+                        end
+                    end
                 end
-                if (sqrt_iter_count == WIDTH-1) state <= S_STORE_RESULT;
-                else sqrt_iter_count <= sqrt_iter_count + 1;
-            end
-            S_STORE_RESULT: begin
-                batch_results[batch_idx] <= sqrt_root;
-               // $display("Batch %d - Final Sqrt Result: %d", batch_idx, sqrt_root);
-                state <= S_RESULT_READY;
-            end
-            S_RESULT_READY: if (output_ready) begin
-                if (batch_idx == 5) begin  //State change to Reset in last batch
-                    state <= S_IDLE;
-                    load_idx <= 0;
-                    load_count <= 0;
-                    batch_idx <= 0;
-                end else begin
-                    // More batches to process.
-                    batch_idx <= batch_idx + 1;
-                    state <= S_BATCH_START;
-                end
-            end
-          endcase
-      end
-    end
 
-    // Combinational read logic for memory
-    always @(*) begin
-        if (dp_read_addr < 6) res = batch_results[dp_read_addr];
-        else res = 0;
+                S_PRIME_START: begin
+                    exp_in <= internal_mem[0]; 
+                    state <= S_PRIME_WAIT;
+                end
+
+                S_PRIME_WAIT: begin
+                    if (latency_counter == EXP_LATENCY - 1) begin
+                        //discarded 1st o/p becuase of 1st cycle pipeline has no o/p. junk result is not considered.
+                        state <= S_COMPUTE_START;
+                        latency_counter <= 0;
+                    end else begin
+                        latency_counter <= latency_counter + 1;
+                    end
+                end
+
+
+                S_COMPUTE_START: begin
+                    exp_in <= internal_mem[compute_idx];
+                    state <= S_COMPUTE_WAIT;
+                end
+
+                S_COMPUTE_WAIT: begin
+                    if (latency_counter == EXP_LATENCY - 1) begin
+                        state <= S_COMPUTE_LATCH;
+                        latency_counter <= 0;
+                    end else begin
+                        latency_counter <= latency_counter + 1;
+                    end
+                end
+
+                S_COMPUTE_LATCH: begin
+                    exp_results[compute_idx] <= exp_out; // Latch the valid, aligned result
+                    if (compute_idx == 31) begin
+                        exp_enable <= 1'b0; // Computation finished, disable the unit
+                        state <= S_RESULTS_READY;
+                    end else begin
+                        compute_idx <= compute_idx + 1;
+                        state <= S_COMPUTE_START;
+                    end
+                end
+
+                S_RESULTS_READY: begin
+
+                    state <= S_RESULTS_READY;
+                end
+
+                default: state <= S_IDLE;
+            endcase
+        end
     end
 endmodule
+
