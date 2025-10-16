@@ -22,9 +22,6 @@
 [submodule "generators/fft-generator"]
 	path = generators/fft-generator
 	url = https://github.com/ucb-bar/FFTGenerator.git
-[submodule "generators/gemmini"]
-	path = generators/gemmini
-	url = https://github.com/ucb-bar/gemmini.git
 [submodule "generators/hardfloat"]
 	path = generators/hardfloat
 	url = https://github.com/ucb-bar/berkeley-hardfloat.git
@@ -163,3 +160,6 @@
 [submodule "generators/radiance"]
 	path = generators/radiance
 	url = https://github.com/ucb-bar/radiance.git
+[submodule "generators/gemmini"]
+	path = generators/gemmini
+	url = https://github.com/sselvanathan125/gemmini
