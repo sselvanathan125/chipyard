@@ -17,12 +17,12 @@ vlsi.inputs.clocks: [
 # Default pin placement can be set by the tool
 # Default pin layer assignments can be found in some tech plug-ins
 vlsi.inputs.pin_mode: generated
-vlsi.inputs.pin.generate_mode: semi_auto
+vlsi.inputs.pin.generate_mode: full_auto
 
 # Specify the floorplan
 # Default floor plan can be set by the tool
 # The path name should match the VLSI_TOP makefile parameter if it is set
-par.innovus.floorplan_mode: "auto"
+#par.innovus.floorplan_mode: "auto"
 vlsi.inputs.placement_constraints:
   - path: "ChipTop"
     type: toplevel

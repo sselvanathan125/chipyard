@@ -1,5 +1,9 @@
 # Technology Setup
 vlsi.core.technology: "hammer.technology.<tech_name>"
+synthesis.yosys.yosys_bin: "/home/chipyard/.conda-yosys/bin/yosys"
+par.openroad.openroad_bin: "/home/chipyard/.conda-openroad/bin/openroad"
+par.openroad.klayout_bin: "/home/chipyard/.conda-klayout/bin/klayout"
+drc.klayout.klayout_bin: "/home/chipyard/.conda-klayout/bin/klayout"
 
 # technology files installation directory
 technology.<tech_name>.install_dir: "</path/to/technology/pdk/>"

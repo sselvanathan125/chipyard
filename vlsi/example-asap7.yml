@@ -1,16 +1,27 @@
 # Technology Setup
 # Technology used is ASAP7
 vlsi.core.technology: "hammer.technology.asap7"
+imports:
+  - "hammer-asap7/asap7-defaults.yml"
 # Specify dir with ASAP7 Calibre deck tarball
-technology.asap7.tarball_dir: "/path/to/asap7"
+technology.asap7.tarball_dir: "/home/chipyard/chipyard/asap7"
 # Specify PDK and std cell install directories
-# technology.asap7.pdk_install_dir: "/path/to/asap7/asap7PDK_r1p7"
-# technology.asap7.stdcell_install_dir: "/path/to/asap7/asap7sc7p5t_27"
-
+synthesis.yosys.yosys_bin: "/home/chipyard/.conda-yosys/bin/yosys"
+technology.asap7.pdk_install_dir: "/home/chipyard/chipyard/asap7/asap7_pdk_r1p7"
+technology.asap7.stdcell_install_dir: "/home/chipyard/chipyard/asap7/asap7sc7p5t_27"
+par.openroad.openroad_bin: "/home/chipyard/.conda-openroad/bin/openroad"
+par.openroad.klayout_bin: "/home/chipyard/.conda-klayout/bin/klayout"
+drc.klayout.klayout_bin: "/home/chipyard/.conda-klayout/bin/klayout"
+vlsi.core.par_tool: "hammer.par.openroad"
+par.openroad.klayout_techfile_source: "/home/chipyard/.conda-klayout/tech/ASAP7/ASAP7_for_KLayout/asap7.lyp"
+par.openroad.openrcx_techfiles: []
+vlsi.inputs.custom_sdc_files: []
 vlsi.core.max_threads: 12
+par.openroad.floorplan_mode: "auto"
 
 # General Hammer Inputs
-
+par:
+  tool_name: openroad
 # Hammer will auto-generate a CPF for simple power designs; see hammer/src/hammer-vlsi/defaults.yml for more info
 vlsi.inputs.power_spec_mode: "auto"
 vlsi.inputs.power_spec_type: "cpf"
@@ -21,8 +32,29 @@ vlsi.inputs.clocks: [
 ]
 
 # Generate Make include to aid in flow
-vlsi.core.build_system: make
+# Generate Make include to aid in flow
+# vlsi/local-yosys-fixes.yml
 
+synthesis.yosys.script_setup:
+    # 1. FIX PARSING: This must run before Hammer's generated file reading starts.
+    # It tells the Verilog frontend to accept SystemVerilog features.
+    - verilog_defaults -use_sva 
+    
+    # 2. Re-run core processing and conversion
+    - clean
+    - proc
+    - log '--- Forcing Asynchronous DFF Conversion and Optimization ---'
+    - async2sync
+    - opt_clean
+    - opt_dff
+    - opt_clean
+    - opt_expr
+    - log '--- Conversion Complete. Continuing flow... ---'
+
+# Ensure these ambiguous, redundant settings are REMOVED from this or ANY included file:
+# synthesis.yosys.extra_pre_abc_commands
+# synthesis.yosys.vlsi.core.synthesis_extra_args
+vlsi.core.build_system: make
 # Placement Constraints
 # For ASAP7, all numbers must be 4x larger than final GDS
 vlsi.inputs.placement_constraints:
@@ -81,10 +113,18 @@ vlsi.inputs.placement_constraints:
 
 # Pin placement constraints
 vlsi.inputs.pin_mode: generated
-vlsi.inputs.pin.generate_mode: semi_auto
+vlsi.inputs.pin.generate_mode: full_auto
 vlsi.inputs.pin.assignments: [
   {pins: "*", layers: ["M5", "M7"], side: "bottom"}
 ]
 
 # SRAM Compiler compiler options
 vlsi.core.sram_generator_tool: "hammer.technology.asap7.sram_compiler"
+
+vlsi.core.reports:
+  - path: "reports/area.rpt"
+    type: "syn-area"
+  - path: "reports/timing.rpt"
+    type: "syn-timing"
+  - path: "reports/power.rpt"
+    type: "syn-power"

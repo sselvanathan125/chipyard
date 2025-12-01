@@ -1,0 +1,23 @@
+# vlsi/local-yosys-fixes.yml
+synthesis.yosys.yosys_bin: "/home/chipyard/.conda-yosys/bin/yosys"
+synthesis.yosys.script_setup:
+    # 1. FIX PARSING: This must run before Hammer's generated file reading starts.
+    # It tells the Verilog frontend to accept SystemVerilog features.
+    - verilog_defaults -use_sva 
+    
+    # 2. Re-run core processing and conversion
+    - clean
+    - proc
+    - log '--- Forcing Asynchronous DFF Conversion and Optimization ---'
+    - async2sync
+    - opt_clean
+    - opt_dff
+    - opt_clean
+    - opt_expr
+    - log '--- Conversion Complete. Continuing flow... ---'
+
+# Ensure these ambiguous, redundant settings are REMOVED from this or ANY included file:
+# synthesis.yosys.extra_pre_abc_commands
+# synthesis.yosys.vlsi.core.synthesis_extra_args
+vlsi.core.par_tool: "hammer.par.openroad"
+  

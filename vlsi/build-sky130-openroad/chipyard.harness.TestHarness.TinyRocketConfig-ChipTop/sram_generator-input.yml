@@ -1,0 +1,2 @@
+vlsi.inputs.sram_parameters: '/home/chipyard/chipyard/vlsi/generated-src/chipyard.harness.TestHarness.TinyRocketConfig/chipyard.harness.TestHarness.TinyRocketConfig.mems.hammer.json'
+vlsi.inputs.sram_parameters_meta: ["transclude", "json2list"]

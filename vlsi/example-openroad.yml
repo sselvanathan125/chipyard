@@ -1,9 +1,44 @@
+# tool binary paths
+vlsi.core.synthesis_tool: "hammer.synthesis.yosys"
+synthesis.yosys.yosys_bin: "/home/chipyard/.conda-yosys/bin/yosys"
+vlsi.core.par_tool: "hammer.par.openroad"
+synthesis.yosys:
+  yosys_bin: "/home/chipyard/.conda-yosys/bin/yosys"
+  read_systemverilog: true
+  vlsi.core.synthesis_extra_args:
+    - async2sync
+par.openroad.openroad_bin: "/home/chipyard/.conda-openroad/bin/openroad"
+par:
+  tool_name: openroad
+par.openroad.klayout_bin: "/home/chipyard/.conda-klayout/bin/klayout"
+drc.klayout.klayout_bin: "/home/chipyard/.conda-klayout/bin/klayout"
+drc.magic.magic_bin: "/home/chipyard/.conda-signoff/bin/magic"
+lvs.netgen.netgen_bin: "/home/chipyard/.conda-signoff/bin/netgen"
+technology.asap7.pdk_install_dir: "/home/chipyard/chipyard/asap7/asap7_pdk_r1p7"
+technology.asap7.stdcell_install_dir: "/home/chipyard/chipyard/asap7/asap7sc7p5t_27"
 # Tool options. Replace with your tool plugin of choice.
 vlsi.core.build_system: make
 # Synthesis: Yosys
-vlsi.core.synthesis_tool: "hammer.synthesis.yosys"
+
+# Tell the Yosys plugin to read input files as SystemVerilog
+#synthesis.yosys.read_systemverilog: true
 # Place-and-Route: OpenROAD
-vlsi.core.par_tool: "hammer.par.openroad"
+# vlsi/local-yosys-fixes.yml
+
+synthesis.yosys.script_setup:
+    # 1. FIX: Enable SystemVerilog parsing features (like always_comb/ff/latch syntax) 
+    # This must run before proc/read_verilog is implicitly called by Hammer.
+    - verilog_defaults -use_sva
+    - clean
+    - proc
+    # --- Critical Fix Sequence: Runs immediately after DFFs are inferred ---
+    - log '--- Forcing Asynchronous DFF Conversion and Optimization ---'
+    - async2sync
+    - opt_clean
+    - opt_dff
+    - opt_clean
+    - opt_expr
+    - log '--- Conversion Complete. Continuing flow... ---'
 # DRC: KLayout or Magic (comment other one out)
 vlsi.core.drc_tool: "hammer.drc.klayout"
 # vlsi.core.drc_tool: "hammer.drc.magic"

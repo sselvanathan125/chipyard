@@ -11,8 +11,9 @@ ifeq ($(tutorial),asap7)
     TOOLS_CONF        ?= example-tools.yml
     TECH_CONF         ?= example-asap7.yml
     DESIGN_CONFS      ?=
-    VLSI_OBJ_DIR      ?= build-asap7-commercial
+    VLSI_OBJ_DIR      ?= build-asap7
     INPUT_CONFS       ?= $(TOOLS_CONF) $(TECH_CONF) $(DESIGN_CONFS) $(EXTRA_CONFS)
+    ENABLE_YOSYS_FLOW  = 1
 endif
 
 ifeq ($(tutorial),sky130-commercial)
